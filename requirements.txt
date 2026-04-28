@@ -1,0 +1,11 @@
+pandas
+openpyxl
+pyarrow
+numpy
+scikit-learn
+scipy
+matplotlib
+seaborn
+factor_analyzer==0.4.1
+prince
+pytest
