@@ -9,3 +9,5 @@ seaborn
 factor_analyzer==0.4.1
 prince
 pytest
+kmodes
+ 

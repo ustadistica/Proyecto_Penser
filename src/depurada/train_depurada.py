@@ -1,43 +1,37 @@
 """
-train_depurada.py
-=================
-AFE + ACM + Clustering Ward — Base Depurada PENSER USTA 2025.
+train_depurada.py — Versión 4.0
+================================
+AFE por Bloques + ACM + Clustering múltiple con validación robusta
+Base: DATA DEPURADA PENSER USTA 2025
 
 Autores : Haider Rojas · Sergio Prieto
 Proyecto: Consultorio de Estadística y Ciencia de Datos — USTA 2026-1
 
-Decisiones metodológicas:
----------------------------
-1. AFE sobre 15 variables de logro + 6 de incidencia (21 variables).
-   - KMO=0.942 (Excelente), Bartlett p≈0.
-   - Kaiser sugiere 2 factores, se usan 3 para interpretabilidad
-     (F1=Competencias, F2=Incidencia formación, F3=Logro transversal específico).
-   - Correlación Spearman + rotación Oblimin.
+Bloques AFE:
+------------
+B1 — Competencias Transversales  (KMO=0.932 Excelente) → 1 factor
+B2 — Competencias Profesionales  (KMO=0.851 Bueno)     → 1 factor
+B3 — Incidencia en Bienestar     (KMO=0.864 Bueno)     → 1 factor
 
-2. ACM sobre variables categóricas: sede, programa, tipo cargo, laborando.
-   - cat_programa tiene 26 categorías (programas con <10 registros → "Otro").
-   - 3 dimensiones retenidas.
-
-3. Clustering Ward k=3 sobre espacio latente AFE+ACM estandarizado.
-   - Silueta k=3: 0.27 (mejor que la base de percepción: 0.11).
-   - Todos los grupos >5% del total.
+Espacio latente: 3 factores AFE + 3 dims ACM = 6 dimensiones
 """
 
 import logging
 import pickle
 import warnings
-from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
 import prince
 from factor_analyzer import FactorAnalyzer
 from factor_analyzer.factor_analyzer import calculate_bartlett_sphericity, calculate_kmo
-from sklearn.cluster import AgglomerativeClustering
+from kmodes.kprototypes import KPrototypes
+from sklearn.cluster import AgglomerativeClustering, DBSCAN
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import calinski_harabasz_score, davies_bouldin_score, silhouette_score
+from sklearn.metrics import (davies_bouldin_score, silhouette_score,
+                              pairwise_distances)
 from sklearn.preprocessing import StandardScaler
 
 warnings.filterwarnings("ignore")
@@ -53,293 +47,516 @@ PROCESSED_PATH = Path("data/processed")
 MODELS_PATH    = Path("models")
 ARTIFACTS_PATH = Path("artifacts")
 
-COLS_LOGRO = [
-    "logro_comp_prof_1", "logro_comp_prof_2", "logro_comp_prof_3",
-    "logro_comp_prof_4", "logro_comp_prof_5",
-    "logro_comunicacion", "logro_relaciones_interpersonales",
-    "logro_toma_decisiones", "logro_solucion_problemas",
-    "logro_pensamiento_creativo", "logro_pensamiento_critico",
-    "logro_manejo_emociones", "logro_manejo_estres",
-    "logro_multiculturales", "logro_interculturales",
-]
+# ---------------------------------------------------------------------------
+# BLOQUES AFE
+# ---------------------------------------------------------------------------
+BLOQUES_AFE = {
+    "B1_Competencias_Transversales": [
+        "logro_comunicacion", "logro_relaciones_interpersonales",
+        "logro_toma_decisiones", "logro_solucion_problemas",
+        "logro_pensamiento_creativo", "logro_pensamiento_critico",
+        "logro_manejo_emociones", "logro_manejo_estres",
+        "logro_multiculturales", "logro_interculturales",
+    ],
+    "B2_Competencias_Profesionales": [
+        "logro_comp_prof_1", "logro_comp_prof_2", "logro_comp_prof_3",
+        "logro_comp_prof_4", "logro_comp_prof_5",
+    ],
+    "B3_Incidencia_Bienestar": [
+        "incidencia_ingresos", "incidencia_empleo", "incidencia_vivienda",
+        "incidencia_salud", "incidencia_recreacion", "incidencia_educacion",
+    ],
+}
 
-COLS_INCIDENCIA = [
-    "incidencia_ingresos", "incidencia_empleo", "incidencia_vivienda",
-    "incidencia_salud", "incidencia_recreacion", "incidencia_educacion",
-]
-
-COLS_AFE = COLS_LOGRO + COLS_INCIDENCIA
+N_FACTORES_BLOQUE = {
+    "B1_Competencias_Transversales":  1,
+    "B2_Competencias_Profesionales":  1,
+    "B3_Incidencia_Bienestar":        1,
+}
 
 COLS_ACM = ["cat_sede", "cat_programa", "cat_tipo_cargo", "cat_laborando"]
 
-COLS_ADICIONALES = [
-    "score_impacto_formacion", "percepcion_programa",
-    "percepcion_ingreso", "formacion_impacto_general",
-    "laborando_actualmente", "ingresos_superiores_estudio",
-]
+COLS_CATEGORICAS_KPROTO = ["cat_sede", "cat_laborando"]
 
-ARCHETYPE_NAMES = {
+ARCHETYPE_NAMES_K3 = {
     0: "El Graduado en Desarrollo",
     1: "El Profesional Impactado",
     2: "El Líder con Alta Incidencia",
 }
 
+ARCHETYPE_NAMES_K4 = {
+    0: "El Graduado en Desarrollo",
+    1: "El Profesional en Formación",
+    2: "El Profesional Impactado",
+    3: "El Líder con Alta Incidencia",
+}
 
-@dataclass
-class ResultadosModelo:
-    timestamp: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    kmo: float = 0.0
-    bartlett_p: float = 0.0
-    n_factores: int = 0
-    varianza_afe: float = 0.0
-    cargas: pd.DataFrame = field(default_factory=pd.DataFrame)
-    n_dim_acm: int = 0
-    inercia_acm: list = field(default_factory=list)
-    k_optimo: int = 0
-    metricas: dict = field(default_factory=dict)
-    distribucion: dict = field(default_factory=dict)
-    n_registros: int = 0
 
-    def imprimir(self):
-        sep = "=" * 65
-        print(f"\n{sep}")
-        print("  RESULTADOS — BASE DEPURADA PENSER USTA 2025")
-        print(f"  Generado: {self.timestamp}")
-        print(sep)
+# ---------------------------------------------------------------------------
+# VALIDACIÓN
+# ---------------------------------------------------------------------------
 
-        print(f"\n🔬 AFE")
-        kmo_label = "Excelente" if self.kmo >= 0.9 else "Bueno" if self.kmo >= 0.8 else "Aceptable"
-        print(f"   KMO                : {self.kmo:.4f} → {kmo_label}")
-        print(f"   Bartlett p         : {self.bartlett_p:.2e} → {'Factible ✅' if self.bartlett_p < 0.05 else 'No factible ❌'}")
-        print(f"   Factores           : {self.n_factores}")
-        print(f"   Varianza explicada : {self.varianza_afe:.1f}%")
+def dunn_index(X: np.ndarray, labels: np.ndarray, n_sample: int = 800) -> float:
+    np.random.seed(42)
+    idx = np.random.choice(len(X), min(n_sample, len(X)), replace=False)
+    X_s, l_s = X[idx], labels[idx]
+    D = pairwise_distances(X_s)
+    unique = np.unique(l_s)
+    min_inter = np.inf
+    for i in unique:
+        for j in unique:
+            if i >= j: continue
+            d = D[np.ix_(l_s == i, l_s == j)].min()
+            min_inter = min(min_inter, d)
+    max_intra = 0
+    for i in unique:
+        mask = l_s == i
+        if mask.sum() < 2: continue
+        d = D[np.ix_(mask, mask)].max()
+        max_intra = max(max_intra, d)
+    return float(min_inter / max_intra) if max_intra > 0 else 0.0
 
-        print(f"\n🗂️  ACM")
-        print(f"   Dimensiones        : {self.n_dim_acm}")
-        for i, v in enumerate(self.inercia_acm, 1):
-            print(f"   Dimensión {i}        : {v:.2f}% inercia")
 
-        print(f"\n📊 MÉTRICAS CLUSTERING")
-        for k, m in sorted(self.metricas.items()):
-            marca = " ← ÓPTIMO" if k == self.k_optimo else ""
-            print(f"   k={k}: silueta={m['silueta']:.4f} | DB={m['davies_bouldin']:.4f} | CH={m['calinski']:.1f}{marca}")
+def balance_score(labels: np.ndarray) -> dict:
+    counts = pd.Series(labels).value_counts().sort_index()
+    total = len(labels)
+    return {
+        "cv":      round(float(counts.std() / counts.mean()), 4),
+        "min_pct": round(float(counts.min() / total * 100), 2),
+        "dist":    dict(counts),
+    }
 
-        print(f"\n👥 DISTRIBUCIÓN DE ARQUETIPOS (n={self.n_registros:,})")
-        for arq, n in sorted(self.distribucion.items()):
-            nombre = ARCHETYPE_NAMES.get(arq, f"Arquetipo {arq}")
-            pct = n / self.n_registros * 100
-            barra = "█" * int(pct / 2)
-            print(f"   {arq} — {nombre:<35}: {n:4d} ({pct:.1f}%) {barra}")
-        print(f"\n{sep}\n")
 
+def score_compuesto(sil, db, dunn, cv) -> float:
+    return sil * 0.35 + dunn * 0.25 + (1 / (1 + db)) * 0.25 + (1 / (1 + cv)) * 0.15
+
+
+# ---------------------------------------------------------------------------
+# ETAPA 1: AFE POR BLOQUES
+# ---------------------------------------------------------------------------
 
 def cargar_base():
     ruta = PROCESSED_PATH / "base_depurada_procesada.parquet"
     if not ruta.exists():
-        raise FileNotFoundError(f"No se encontró: {ruta}\nEjecuta primero: python src/depurada/features_depurada.py")
+        raise FileNotFoundError(
+            f"No encontrado: {ruta}\n"
+            f"Ejecuta: python src/depurada/features_depurada.py"
+        )
     df = pd.read_parquet(ruta)
-    log.info(f"Base cargada: {df.shape[0]:,} filas × {df.shape[1]} columnas")
+    log.info(f"Base cargada: {df.shape[0]:,} × {df.shape[1]}")
     return df
 
 
-def preparar_afe(df):
-    cols = [c for c in COLS_AFE if c in df.columns]
-    X = df[cols].apply(pd.to_numeric, errors="coerce")
+def afe_por_bloques(df: pd.DataFrame) -> tuple:
     imp = SimpleImputer(strategy="median")
-    X_imp = pd.DataFrame(imp.fit_transform(X), columns=cols, index=X.index)
-    log.info(f"Matriz AFE: {len(cols)} variables, {X_imp.isnull().sum().sum()} nulos imputados.")
-    return X_imp
+    scores_bloques = {}
+    resumen_bloques = {}
 
+    log.info("=" * 55)
+    log.info("ETAPA 1 — AFE POR BLOQUES")
+    log.info("=" * 55)
 
-def verificar_afe(X, r):
-    X_ranks = X.rank()
-    chi2, p = calculate_bartlett_sphericity(X_ranks)
-    _, kmo = calculate_kmo(X_ranks)
-    r.kmo = round(kmo, 4)
-    r.bartlett_p = float(p)
-    kmo_label = "Excelente" if kmo >= 0.9 else "Bueno" if kmo >= 0.8 else "Aceptable"
-    log.info(f"KMO={kmo:.4f} ({kmo_label}) | Bartlett p={p:.2e}")
-
-    eigvals = np.linalg.eigvalsh(X_ranks.corr().values)[::-1]
-    n_kaiser = int((eigvals > 1).sum())
-    log.info(f"Kaiser: {n_kaiser} factores | Varianza: " +
-             " | ".join([f"{i+1}F={np.cumsum(eigvals/eigvals.sum()*100)[i]:.1f}%" for i in [1,2,3,4]]))
-    return max(3, min(n_kaiser, 5))
-
-
-def aplicar_afe(X, n_factores, r):
-    log.info(f"AFE: {n_factores} factores, Oblimin, Spearman...")
-    fa = FactorAnalyzer(n_factors=n_factores, rotation="oblimin", method="principal", use_smc=True)
-    fa.fit(X.rank())
-    var = fa.get_factor_variance()
-    r.n_factores = n_factores
-    r.varianza_afe = round(sum(var[1]) * 100, 2)
-    log.info(f"Varianza total: {r.varianza_afe:.1f}%")
-    for i, (ss, prop, cum) in enumerate(zip(var[0], var[1], var[2]), 1):
-        log.info(f"  F{i}: SS={ss:.3f}, {prop*100:.1f}%, acum={cum*100:.1f}%")
-
-    r.cargas = pd.DataFrame(fa.loadings_, index=X.columns,
-                             columns=[f"F{i+1}" for i in range(n_factores)]).round(3)
-
-    scores = pd.DataFrame(fa.transform(X.rank()), index=X.index,
-                           columns=[f"score_F{i+1}" for i in range(n_factores)])
-    log.info(f"Scores AFE: {scores.shape}")
-
-    print("\n📋 CARGAS FACTORIALES (|carga| > 0.35)")
-    print("-" * 55)
-    for factor in r.cargas.columns:
-        top = r.cargas[factor].abs().sort_values(ascending=False)
-        top = top[top > 0.35]
-        if top.empty:
+    for nombre, cols in BLOQUES_AFE.items():
+        cols_ok = [c for c in cols if c in df.columns]
+        if not cols_ok:
+            log.warning(f"  {nombre}: sin columnas")
             continue
-        print(f"\n  {factor}:")
-        for var_name, _ in top.items():
-            signo = "+" if r.cargas.loc[var_name, factor] > 0 else "-"
-            print(f"    {signo}{abs(r.cargas.loc[var_name, factor]):.3f}  {var_name}")
 
-    return scores, fa
+        X = df[cols_ok].apply(pd.to_numeric, errors="coerce")
+        X_imp = pd.DataFrame(imp.fit_transform(X), columns=cols_ok, index=df.index)
+        X_ranks = X_imp.rank()
+
+        try:
+            chi2, p = calculate_bartlett_sphericity(X_ranks)
+            _, kmo = calculate_kmo(X_ranks)
+        except Exception:
+            kmo, p = 0.0, 1.0
+
+        kmo_label = ("Excelente" if kmo >= 0.9 else "Bueno" if kmo >= 0.8
+                     else "Aceptable" if kmo >= 0.7 else "Mediocre")
+        n_factores = N_FACTORES_BLOQUE.get(nombre, 1)
+
+        try:
+            fa = FactorAnalyzer(
+                n_factors=n_factores,
+                rotation="varimax" if n_factores == 1 else "oblimin",
+                method="principal", use_smc=True
+            )
+            fa.fit(X_ranks)
+            var = fa.get_factor_variance()
+            var_total = sum(var[1]) * 100
+
+            scores = pd.DataFrame(
+                fa.transform(X_ranks),
+                index=df.index,
+                columns=[f"{nombre}_F{i+1}" for i in range(n_factores)]
+            )
+            for col in scores.columns:
+                scores_bloques[col] = scores[col]
+
+            cargas = pd.DataFrame(
+                fa.loadings_, index=cols_ok,
+                columns=[f"F{i+1}" for i in range(n_factores)]
+            ).round(3)
+
+            resumen_bloques[nombre] = {
+                "kmo": round(kmo, 4), "kmo_label": kmo_label,
+                "bartlett_p": float(p), "n_factores": n_factores,
+                "varianza_total": round(var_total, 2),
+                "cargas": cargas, "n_vars": len(cols_ok),
+            }
+
+            log.info(f"  {nombre}: KMO={kmo:.4f} ({kmo_label}) | "
+                     f"{n_factores}F | var={var_total:.1f}%")
+
+        except Exception as e:
+            log.warning(f"  {nombre}: ERROR — {e}")
+            continue
+
+    scores_df = pd.DataFrame(scores_bloques, index=df.index)
+    log.info(f"  → {scores_df.shape[1]} indicadores AFE generados")
+    return scores_df, resumen_bloques
 
 
-def preparar_acm(df):
+def imprimir_resumen_afe(resumen: dict) -> None:
+    print("\n" + "=" * 65)
+    print("  AFE POR BLOQUES — BASE DEPURADA")
+    print("=" * 65)
+    for nombre, info in resumen.items():
+        print(f"\n  {nombre}")
+        print(f"    KMO      : {info['kmo']:.4f} → {info['kmo_label']}")
+        print(f"    Bartlett : p={info['bartlett_p']:.2e} "
+              f"{'✅' if info['bartlett_p'] < 0.05 else '❌'}")
+        print(f"    Factores : {info['n_factores']}")
+        print(f"    Varianza : {info['varianza_total']:.1f}%")
+        print(f"    Variables: {info['n_vars']}")
+        if "cargas" in info:
+            print(f"    Cargas principales (|>0.5|):")
+            for factor in info["cargas"].columns:
+                top = info["cargas"][factor].abs()
+                top = top[top > 0.5].sort_values(ascending=False)
+                if not top.empty:
+                    vars_str = ", ".join([
+                        f"{v}({info['cargas'].loc[v,factor]:+.2f})"
+                        for v in top.index[:3]
+                    ])
+                    print(f"      {factor}: {vars_str}")
+
+
+# ---------------------------------------------------------------------------
+# ETAPA 2: ACM
+# ---------------------------------------------------------------------------
+
+def aplicar_acm(df: pd.DataFrame) -> tuple:
+    log.info("=" * 55)
+    log.info("ETAPA 2 — ACM")
+    log.info("=" * 55)
+
     cols = [c for c in COLS_ACM if c in df.columns]
     X_cat = df[cols].copy()
     for col in cols:
         moda = X_cat[col].mode()
-        if len(moda) > 0:
-            X_cat[col] = X_cat[col].fillna(moda[0])
-    log.info(f"ACM: {len(cols)} variables, {len(X_cat):,} registros.")
-    return X_cat
+        X_cat[col] = X_cat[col].fillna(moda[0] if len(moda) > 0 else "Otro")
 
-
-def aplicar_acm(X_cat, r):
-    log.info("Aplicando ACM (3 dimensiones)...")
     mca = prince.MCA(n_components=3, random_state=42)
     mca.fit(X_cat)
     coords = mca.transform(X_cat)
     coords.columns = [f"acm_dim{i+1}" for i in range(3)]
-    r.n_dim_acm = 3
+    coords.index = df.index
+
     try:
         eigs = mca.eigenvalues_
         total = sum(eigs)
-        r.inercia_acm = [round(float(e/total*100), 2) for e in eigs[:3]]
+        inercia = [round(float(e/total*100), 2) for e in eigs[:3]]
     except Exception:
-        r.inercia_acm = [0.0, 0.0, 0.0]
-    log.info(f"Inercia ACM: {r.inercia_acm}")
-    return coords, mca
+        inercia = [0.0, 0.0, 0.0]
+
+    log.info(f"  ACM: {len(cols)} vars | inercia: {inercia}")
+    return coords, mca, inercia
 
 
-def evaluar_clustering(X, k_range=range(2, 7)):
+# ---------------------------------------------------------------------------
+# ETAPA 3: ESPACIO LATENTE
+# ---------------------------------------------------------------------------
+
+def construir_espacio_latente(scores_afe, coords_acm):
+    X = pd.concat([scores_afe, coords_acm], axis=1)
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    log.info(f"  Espacio latente: {X_scaled.shape[1]} dims "
+             f"({scores_afe.shape[1]} AFE + {coords_acm.shape[1]} ACM)")
+    return X_scaled, scaler
+
+
+# ---------------------------------------------------------------------------
+# ETAPA 4: CLUSTERING
+# ---------------------------------------------------------------------------
+
+def evaluar_ward(X, k_range=range(2, 8)):
     resultados = {}
-    log.info("Evaluando clustering Ward...")
+    log.info("Ward jerárquico...")
     for k in k_range:
         hc = AgglomerativeClustering(n_clusters=k, linkage="ward")
         labels = hc.fit_predict(X)
-        sil = silhouette_score(X, labels)
-        db  = davies_bouldin_score(X, labels)
-        ch  = calinski_harabasz_score(X, labels)
-        resultados[k] = {"silueta": round(sil,4), "davies_bouldin": round(db,4),
-                         "calinski": round(ch,2), "labels": labels}
-        log.info(f"  k={k}: sil={sil:.4f} | DB={db:.4f} | CH={ch:.1f}")
+        sil  = silhouette_score(X, labels)
+        db   = davies_bouldin_score(X, labels)
+        dunn = dunn_index(X, labels)
+        bal  = balance_score(labels)
+        sc   = score_compuesto(sil, db, dunn, bal["cv"])
+        resultados[k] = {
+            "labels": labels, "sil": round(sil,4), "db": round(db,4),
+            "dunn": round(dunn,4), "bal": bal, "score": round(sc,4)
+        }
+        log.info(f"  k={k}: sil={sil:.4f} | Dunn={dunn:.4f} | DB={db:.4f} | "
+                 f"CV={bal['cv']:.3f} | min={bal['min_pct']:.1f}% | score={sc:.4f}")
     return resultados
 
 
-def seleccionar_k(resultados, k_min=3):
-    mejor_k, mejor_sil = None, -1
-    total = len(list(resultados.values())[0]["labels"])
-    for k, m in resultados.items():
-        if k < k_min:
-            continue
-        min_g = min(pd.Series(m["labels"]).value_counts())
-        if min_g / total < 0.05:
-            log.warning(f"k={k} descartado: grupo mínimo {min_g/total*100:.1f}% < 5%")
-            continue
-        if m["silueta"] > mejor_sil:
-            mejor_sil = m["silueta"]
-            mejor_k = k
-    if mejor_k is None:
-        mejor_k = 3
-    log.info(f"k óptimo: {mejor_k} (silueta={resultados[mejor_k]['silueta']:.4f})")
-    return mejor_k
+def evaluar_kprototypes(df, X_latente, k_range=range(2, 8)):
+    resultados = {}
+    log.info("K-Prototypes...")
+
+    all_num = []
+    for cols in BLOQUES_AFE.values():
+        all_num += [c for c in cols if c in df.columns]
+
+    cat_cols_kp = [c for c in COLS_CATEGORICAS_KPROTO if c in df.columns]
+    imp = SimpleImputer(strategy="median")
+    X_num = pd.DataFrame(
+        imp.fit_transform(df[all_num].apply(pd.to_numeric, errors="coerce")),
+        columns=all_num
+    )
+    X_cat_kp = df[cat_cols_kp].fillna("Otro").astype(str)
+    X_kp = np.hstack([X_num.values, X_cat_kp.values])
+    cat_idx = list(range(len(all_num), len(all_num) + len(cat_cols_kp)))
+
+    for k in k_range:
+        try:
+            kp = KPrototypes(n_clusters=k, init="Cao", random_state=42,
+                             n_init=3, verbose=0)
+            labels = kp.fit_predict(X_kp, categorical=cat_idx)
+            sil  = silhouette_score(X_latente, labels)
+            db   = davies_bouldin_score(X_latente, labels)
+            dunn = dunn_index(X_latente, labels)
+            bal  = balance_score(labels)
+            sc   = score_compuesto(sil, db, dunn, bal["cv"])
+            resultados[k] = {
+                "labels": labels, "sil": round(sil,4), "db": round(db,4),
+                "dunn": round(dunn,4), "bal": bal, "score": round(sc,4)
+            }
+            log.info(f"  k={k}: sil={sil:.4f} | Dunn={dunn:.4f} | DB={db:.4f} | "
+                     f"CV={bal['cv']:.3f} | min={bal['min_pct']:.1f}% | score={sc:.4f}")
+        except Exception as e:
+            log.warning(f"  k={k}: ERROR — {e}")
+    return resultados
 
 
-def renombrar_por_score(labels, df):
-    if "score_impacto_formacion" not in df.columns:
+def evaluar_dbscan(X):
+    resultados = {}
+    log.info("DBSCAN...")
+    for eps in [0.3, 0.5, 0.8, 1.0, 1.5]:
+        for min_s in [20, 30]:
+            dbs = DBSCAN(eps=eps, min_samples=min_s)
+            labels = dbs.fit_predict(X)
+            n_cl = len(set(labels)) - (1 if -1 in labels else 0)
+            n_noise = (labels == -1).sum()
+            noise_pct = n_noise / len(labels) * 100
+            if n_cl >= 2 and noise_pct < 20:
+                mask = labels != -1
+                sil = silhouette_score(X[mask], labels[mask])
+                bal = balance_score(labels[labels != -1])
+                resultados[f"eps{eps}_min{min_s}"] = {
+                    "n_clusters": n_cl, "noise_pct": round(noise_pct,1),
+                    "sil": round(sil,4), "bal": bal
+                }
+                log.info(f"  eps={eps} min={min_s}: k={n_cl} | "
+                         f"ruido={noise_pct:.1f}% | sil={sil:.4f}")
+    if not resultados:
+        log.info("  DBSCAN: no viable — datos ordinales sin estructura de densidad")
+    return resultados
+
+
+def seleccionar_mejor_k(resultados, metodo, k_min=3):
+    candidatos_bal = {
+        k: v for k, v in resultados.items()
+        if k >= k_min and v["bal"]["min_pct"] >= 15
+    }
+    if not candidatos_bal:
+        log.warning(f"  {metodo}: ningún k>={k_min} con min%>=15. Relajando a min%>=10")
+        candidatos_bal = {k: v for k, v in resultados.items()
+                          if k >= k_min and v["bal"]["min_pct"] >= 10}
+    if not candidatos_bal:
+        candidatos_bal = {k: v for k, v in resultados.items() if k >= k_min}
+    if not candidatos_bal:
+        candidatos_bal = resultados
+
+    ordenados_bal = sorted(candidatos_bal.items(), key=lambda x: x[1]["score"], reverse=True)
+    k_opt = ordenados_bal[0][0]
+
+    candidatos_sec = {k: v for k, v in resultados.items() if k != k_opt}
+    if candidatos_sec:
+        k_second = sorted(candidatos_sec.items(), key=lambda x: x[1]["score"], reverse=True)[0][0]
+    else:
+        k_second = k_opt
+
+    log.info(f"  {metodo} → óptimo=k{k_opt} "
+             f"(score={resultados[k_opt]['score']:.4f}, min%={resultados[k_opt]['bal']['min_pct']:.1f}%) | "
+             f"2do=k{k_second} "
+             f"(score={resultados[k_second]['score']:.4f}, min%={resultados[k_second]['bal']['min_pct']:.1f}%)")
+    return k_opt, k_second
+
+
+def renombrar_por_incidencia(labels, df):
+    col = "score_impacto_formacion"
+    if col not in df.columns:
         return labels
     df_t = df.reset_index(drop=True).copy()
     df_t["_cl"] = labels
-    orden = df_t.groupby("_cl")["score_impacto_formacion"].mean().sort_values().index.tolist()
+    orden = df_t.groupby("_cl")[col].mean().sort_values().index.tolist()
     mapa = {old: new for new, old in enumerate(orden)}
-    log.info(f"Arquetipos renombrados por impacto formación: {mapa}")
+    log.info(f"  Renombrado por incidencia: {mapa}")
     return np.array([mapa[l] for l in labels])
 
 
-def guardar(df, labels, fa, mca, scaler, resultados, k, r):
+# ---------------------------------------------------------------------------
+# IMPRIMIR Y GUARDAR
+# ---------------------------------------------------------------------------
+
+def imprimir_comparacion(ward_res, kproto_res, dbscan_res,
+                          k_opt_w, k_sec_w, k_opt_kp, k_sec_kp):
+    sep = "=" * 65
+    print(f"\n{sep}")
+    print("  COMPARACIÓN DE MÉTODOS — BASE DEPURADA")
+    print(sep)
+    print(f"\n{'MÉTODO':<15} {'k':>3} {'Silueta':>9} {'Dunn':>9} {'DB':>9} "
+          f"{'CV':>8} {'min%':>7} {'score':>8}")
+    print("-" * 65)
+    for k, v in sorted(ward_res.items()):
+        marca = "← ÓPT" if k==k_opt_w else ("← 2do" if k==k_sec_w else "")
+        print(f"{'Ward':<15} {k:>3} {v['sil']:>9.4f} {v['dunn']:>9.4f} "
+              f"{v['db']:>9.4f} {v['bal']['cv']:>8.3f} {v['bal']['min_pct']:>7.1f}% "
+              f"{v['score']:>8.4f} {marca}")
+    print()
+    for k, v in sorted(kproto_res.items()):
+        marca = "← ÓPT" if k==k_opt_kp else ("← 2do" if k==k_sec_kp else "")
+        print(f"{'KPrototypes':<15} {k:>3} {v['sil']:>9.4f} {v['dunn']:>9.4f} "
+              f"{v['db']:>9.4f} {v['bal']['cv']:>8.3f} {v['bal']['min_pct']:>7.1f}% "
+              f"{v['score']:>8.4f} {marca}")
+    if dbscan_res:
+        print("\nDBSCAN viables:")
+        for cfg, v in dbscan_res.items():
+            print(f"  {cfg}: k={v['n_clusters']} | ruido={v['noise_pct']}% | sil={v['sil']:.4f}")
+    else:
+        print("\nDBSCAN: No viable")
+    print(f"\n{sep}")
+
+
+def guardar_todo(df, labels_w_opt, labels_w_sec, labels_kp_opt, labels_kp_sec,
+                 k_opt_w, k_sec_w, k_opt_kp, k_sec_kp,
+                 ward_res, kproto_res, resumen_afe, mca, scaler):
+
     MODELS_PATH.mkdir(parents=True, exist_ok=True)
     ARTIFACTS_PATH.mkdir(parents=True, exist_ok=True)
 
+    archetype_names = ARCHETYPE_NAMES_K4 if k_opt_w == 4 else ARCHETYPE_NAMES_K3
+
     df_out = df.reset_index(drop=True).copy()
-    df_out["arquetipo"] = labels
-    df_out["nombre_arquetipo"] = df_out["arquetipo"].map(
-        lambda x: ARCHETYPE_NAMES.get(int(x), f"Arquetipo {x}")
+    df_out["arquetipo_ward_opt"]   = labels_w_opt
+    df_out["arquetipo_ward_sec"]   = labels_w_sec
+    df_out["arquetipo_kproto_opt"] = labels_kp_opt
+    df_out["arquetipo_kproto_sec"] = labels_kp_sec
+    df_out["arquetipo"]            = labels_w_opt
+    df_out["nombre_arquetipo"]     = df_out["arquetipo"].map(
+        lambda x: archetype_names.get(int(x), f"Arquetipo {x}")
     )
     for col in df_out.select_dtypes(include="object").columns:
         df_out[col] = df_out[col].astype(str).where(df_out[col].notna(), other=None)
     df_out.to_parquet(ARTIFACTS_PATH / "base_depurada_con_arquetipos.parquet", index=False)
-    log.info("Base con arquetipos guardada.")
 
-    r.cargas.to_csv(ARTIFACTS_PATH / "cargas_factoriales_depurada.csv")
-
-    filas = [{"k": k_val, **{m: v for m, v in met.items() if m != "labels"}}
-             for k_val, met in resultados.items()]
+    filas = []
+    for k, v in ward_res.items():
+        filas.append({"metodo":"Ward","k":k,"sil":v["sil"],"db":v["db"],
+                      "dunn":v["dunn"],"cv":v["bal"]["cv"],"min_pct":v["bal"]["min_pct"],"score":v["score"]})
+    for k, v in kproto_res.items():
+        filas.append({"metodo":"KPrototypes","k":k,"sil":v["sil"],"db":v["db"],
+                      "dunn":v["dunn"],"cv":v["bal"]["cv"],"min_pct":v["bal"]["min_pct"],"score":v["score"]})
     pd.DataFrame(filas).to_csv(ARTIFACTS_PATH / "metricas_clustering_depurada.csv", index=False)
 
-    with open(MODELS_PATH / "modelo_depurada.pkl", "wb") as f:
-        pickle.dump({"fa": fa, "mca": mca, "scaler": scaler, "k": k,
-                     "archetype_names": ARCHETYPE_NAMES,
-                     "cols_afe": COLS_AFE, "cols_acm": COLS_ACM}, f)
-    log.info("Modelo guardado.")
+    for nombre, info in resumen_afe.items():
+        if "cargas" in info:
+            info["cargas"].to_csv(ARTIFACTS_PATH / f"cargas_depurada_{nombre}.csv")
 
+    with open(MODELS_PATH / "modelo_depurada.pkl", "wb") as f:
+        pickle.dump({
+            "mca": mca, "scaler": scaler,
+            "k_opt_ward": k_opt_w, "k_sec_ward": k_sec_w,
+            "k_opt_kproto": k_opt_kp, "k_sec_kproto": k_sec_kp,
+            "archetype_names": archetype_names,
+            "bloques_afe": BLOQUES_AFE,
+        }, f)
+    log.info("Modelo depurada guardado.")
+
+
+# ---------------------------------------------------------------------------
+# PIPELINE PRINCIPAL
+# ---------------------------------------------------------------------------
 
 def run():
-    r = ResultadosModelo()
+    log.info("=" * 55)
+    log.info("PIPELINE TRAIN DEPURADA V4")
+    log.info("=" * 55)
+
     df = cargar_base()
 
-    log.info("=" * 50)
-    log.info("ETAPA 1 — AFE")
-    log.info("=" * 50)
-    X_afe = preparar_afe(df)
-    n_factores = verificar_afe(X_afe, r)
-    scores_afe, fa = aplicar_afe(X_afe, n_factores, r)
+    scores_afe, resumen_afe = afe_por_bloques(df)
+    imprimir_resumen_afe(resumen_afe)
 
-    log.info("=" * 50)
-    log.info("ETAPA 2 — ACM")
-    log.info("=" * 50)
-    X_cat = preparar_acm(df)
-    coords_acm, mca = aplicar_acm(X_cat, r)
+    coords_acm, mca, inercia = aplicar_acm(df)
 
-    log.info("=" * 50)
-    log.info("ETAPA 3 — CLUSTERING WARD")
-    log.info("=" * 50)
-    X_latente = np.hstack([
-        scores_afe.reset_index(drop=True).values,
-        coords_acm.reset_index(drop=True).values,
-    ])
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X_latente)
-    r.n_registros = len(X_scaled)
+    log.info("=" * 55)
+    log.info("ETAPA 3 — ESPACIO LATENTE")
+    log.info("=" * 55)
+    X_latente, scaler = construir_espacio_latente(scores_afe, coords_acm)
 
-    resultados = evaluar_clustering(X_scaled)
-    k_optimo = 3  # Forzado por interpretabilidad (sil k=3 vs k=2 difiere 0.03)
-    r.k_optimo = k_optimo
-    r.metricas = {k: {m: v for m, v in met.items() if m != "labels"}
-                  for k, met in resultados.items()}
+    log.info("=" * 55)
+    log.info("ETAPA 4 — CLUSTERING")
+    log.info("=" * 55)
+    ward_res   = evaluar_ward(X_latente)
+    kproto_res = evaluar_kprototypes(df, X_latente)
+    dbscan_res = evaluar_dbscan(X_latente)
 
-    labels = resultados[k_optimo]["labels"]
-    labels = renombrar_por_score(labels, df)
-    r.distribucion = dict(pd.Series(labels).value_counts().sort_index())
+    k_opt_w,  k_sec_w  = seleccionar_mejor_k(ward_res,   "Ward")
+    k_opt_kp, k_sec_kp = seleccionar_mejor_k(kproto_res, "KPrototypes")
 
-    r.imprimir()
-    guardar(df, labels, fa, mca, scaler, resultados, k_optimo, r)
+    imprimir_comparacion(ward_res, kproto_res, dbscan_res,
+                          k_opt_w, k_sec_w, k_opt_kp, k_sec_kp)
+
+    labels_w_opt  = renombrar_por_incidencia(ward_res[k_opt_w]["labels"], df)
+    labels_w_sec  = renombrar_por_incidencia(ward_res[k_sec_w]["labels"], df)
+    labels_kp_opt = renombrar_por_incidencia(kproto_res[k_opt_kp]["labels"], df)
+    labels_kp_sec = renombrar_por_incidencia(kproto_res[k_sec_kp]["labels"], df)
+
+    print(f"\n{'='*65}")
+    print("  DISTRIBUCIÓN FINAL")
+    print(f"{'='*65}")
+    for nombre, labels, k in [
+        (f"Ward k={k_opt_w} (óptimo)",   labels_w_opt,  k_opt_w),
+        (f"Ward k={k_sec_w} (2do mejor)", labels_w_sec,  k_sec_w),
+        (f"KProto k={k_opt_kp} (óptimo)", labels_kp_opt, k_opt_kp),
+        (f"KProto k={k_sec_kp} (2do)",    labels_kp_sec, k_sec_kp),
+    ]:
+        counts = pd.Series(labels).value_counts().sort_index()
+        total = len(labels)
+        print(f"\n  {nombre}:")
+        for arq, n in counts.items():
+            barra = "█" * int(n/total*30)
+            print(f"    {arq}: {n:4d} ({n/total*100:.1f}%) {barra}")
+
+    guardar_todo(df, labels_w_opt, labels_w_sec, labels_kp_opt, labels_kp_sec,
+                 k_opt_w, k_sec_w, k_opt_kp, k_sec_kp,
+                 ward_res, kproto_res, resumen_afe, mca, scaler)
+
+    log.info("Pipeline depurada completado.")
     return df
 
 

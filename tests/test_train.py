@@ -1,7 +1,6 @@
 """
-test_train.py
-=============
-Pruebas unitarias para train.py (AFE + ACM + Ward).
+test_train.py — Version 4.0
+Tests actualizados para train.py V4 (AFE por bloques + Ward + KPrototypes)
 Autores: Haider Rojas · Sergio Prieto — USTA 2026-1
 """
 
@@ -14,174 +13,199 @@ import pytest
 from sklearn.preprocessing import StandardScaler
 
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
 @pytest.fixture
 def df_procesado():
-    """Base procesada simulada con variables analíticas."""
+    """Base procesada simulada con variables de los 5 bloques AFE."""
     np.random.seed(42)
     n = 300
-    cols_comp = [
-        "com_escrita", "com_oral", "pensamiento_critico", "metodos_cuantitativos",
-        "metodos_cualitativos", "lectura_academica", "argumentacion", "segunda_lengua",
-        "creatividad", "resolucion_conflictos", "liderazgo", "toma_decisiones",
-        "resolucion_problemas", "investigacion", "herramientas_informaticas",
-        "contextos_multiculturales", "insercion_laboral", "herramientas_modernas",
-        "gestion_informacion", "trabajo_equipo", "aprendizaje_autonomo",
-        "conocimientos_multidisciplinares", "etica",
-    ]
-    cols_sat = [
-        "satisfaccion_formacion", "efecto_calidad_vida", "satisfaccion_vida",
-        "correspondencia_primer_empleo", "correspondencia_empleo_actual",
-    ]
-    data = {c: np.random.choice([1, 2, 3, 4, 5], n) for c in cols_comp + cols_sat}
+    # B1 Cognitivo
+    b1 = ["com_escrita","com_oral","pensamiento_critico","lectura_academica",
+          "argumentacion","creatividad","metodos_cualitativos","metodos_cuantitativos"]
+    # B2 Tecnológico
+    b2 = ["herramientas_modernas","insercion_laboral","gestion_informacion",
+          "herramientas_informaticas","contextos_multiculturales",
+          "conocimientos_multidisciplinares","aprendizaje_autonomo"]
+    # B3 Liderazgo
+    b3 = ["liderazgo","toma_decisiones","resolucion_problemas",
+          "resolucion_conflictos","trabajo_equipo","investigacion","etica"]
+    # B4a Satisfacción
+    b4a = ["satisfaccion_formacion","efecto_calidad_vida","satisfaccion_vida"]
+    # B4b Correspondencia
+    b4b = ["correspondencia_primer_empleo","correspondencia_empleo_actual"]
+    # B5 Bienestar
+    b5 = ["adquirio_bienes","mejoro_vivienda","mejoro_salud",
+          "acceso_seguridad_social","incremento_cultural","satisfecho_ocio","red_amigos"]
+    # Categóricas
+    cats = ["cat_genero","cat_sede","cat_estado_civil","cat_recomendaria",
+            "cat_estudiaria_otra_vez","cat_nivel_educ_padres"]
+
+    data = {}
+    for c in b1+b2+b3: data[c] = np.random.choice([1,2,3,4,5], n)
+    for c in b4a: data[c] = np.random.choice([0,1,2,3,4,5], n)
+    for c in b4b: data[c] = np.random.choice([0,1,2,3,4,5], n)
+    for c in b5: data[c] = np.random.choice([0,1], n)
+    data["cat_genero"] = np.random.choice(["Masculino","Femenino"], n)
+    data["cat_sede"] = np.random.choice(["Bogotá","Bucaramanga","Tunja"], n)
+    data["cat_estado_civil"] = np.random.choice(["Soltero","Casado"], n)
+    data["cat_recomendaria"] = np.random.choice(["Si","No"], n)
+    data["cat_estudiaria_otra_vez"] = np.random.choice(["Si","No","No lo sabe"], n)
+    data["cat_nivel_educ_padres"] = np.random.choice(["Media","Universitario","Basica"], n)
     data["score_bienestar"] = np.random.randint(0, 8, n)
-    data["movilidad_social"] = np.random.randint(-2, 3, n)
-    data["cat_genero"] = np.random.choice(["Masculino", "Femenino"], n)
-    data["cat_sede"] = np.random.choice(["Bogotá", "Bucaramanga"], n)
+
     return pd.DataFrame(data)
 
 
-# ---------------------------------------------------------------------------
-# Tests de preparación AFE
-# ---------------------------------------------------------------------------
+# ─── Tests AFE ─────────────────────────────────────────────────────
 
-def test_preparar_afe_retorna_dataframe(df_procesado):
-    """preparar_matriz_afe retorna un DataFrame."""
-    from train import preparar_matriz_afe
-    result = preparar_matriz_afe(df_procesado)
-    assert isinstance(result, pd.DataFrame)
+def test_afe_bloques_retorna_dataframe(df_procesado):
+    """afe_por_bloques retorna un DataFrame de scores."""
+    from train import afe_por_bloques
+    scores, resumen = afe_por_bloques(df_procesado)
+    assert isinstance(scores, pd.DataFrame)
 
 
-def test_preparar_afe_sin_nulos(df_procesado):
-    """preparar_matriz_afe elimina todos los nulos."""
-    from train import preparar_matriz_afe
-    result = preparar_matriz_afe(df_procesado)
-    assert result.isnull().sum().sum() == 0
+def test_afe_bloques_sin_nulos(df_procesado):
+    """afe_por_bloques no tiene nulos en los scores."""
+    from train import afe_por_bloques
+    scores, _ = afe_por_bloques(df_procesado)
+    assert scores.isnull().sum().sum() == 0
 
 
-def test_preparar_afe_columnas_correctas(df_procesado):
-    """preparar_matriz_afe solo incluye columnas de competencias y satisfacción."""
-    from train import preparar_matriz_afe, COLS_COMPETENCIAS, COLS_SATISFACCION
-    result = preparar_matriz_afe(df_procesado)
-    for col in result.columns:
-        assert col in COLS_COMPETENCIAS + COLS_SATISFACCION
+def test_afe_bloques_genera_indicadores(df_procesado):
+    """afe_por_bloques genera al menos 5 indicadores."""
+    from train import afe_por_bloques
+    scores, resumen = afe_por_bloques(df_procesado)
+    assert scores.shape[1] >= 5
 
 
-def test_preparar_afe_conserva_registros(df_procesado):
-    """preparar_matriz_afe conserva el número de registros."""
-    from train import preparar_matriz_afe
-    result = preparar_matriz_afe(df_procesado)
-    assert len(result) == len(df_procesado)
+def test_afe_bloques_conserva_registros(df_procesado):
+    """afe_por_bloques conserva el número de registros."""
+    from train import afe_por_bloques
+    scores, _ = afe_por_bloques(df_procesado)
+    assert len(scores) == len(df_procesado)
 
 
-# ---------------------------------------------------------------------------
-# Tests de estandarización
-# ---------------------------------------------------------------------------
+def test_afe_resumen_contiene_kmo(df_procesado):
+    """El resumen AFE contiene KMO para cada bloque."""
+    from train import afe_por_bloques
+    _, resumen = afe_por_bloques(df_procesado)
+    for nombre, info in resumen.items():
+        assert "kmo" in info
+        assert 0 <= info["kmo"] <= 1
+
+
+# ─── Tests estandarización ─────────────────────────────────────────
 
 def test_estandarizar_media_cero(df_procesado):
     """El espacio latente estandarizado tiene media ~0."""
-    from train import preparar_matriz_afe
-    X = preparar_matriz_afe(df_procesado)
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    medias = np.abs(X_scaled.mean(axis=0))
-    assert (medias < 1e-10).all()
+    from train import afe_por_bloques, aplicar_acm, construir_espacio_latente
+    scores, _ = afe_por_bloques(df_procesado)
+    coords, _, _ = aplicar_acm(df_procesado)
+    X_scaled, _, _ = construir_espacio_latente(scores, coords)
+    assert np.abs(X_scaled.mean(axis=0)).max() < 1e-10
 
 
 def test_estandarizar_std_uno(df_procesado):
     """El espacio latente estandarizado tiene std ~1."""
-    from train import preparar_matriz_afe
-    X = preparar_matriz_afe(df_procesado)
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    stds = X_scaled.std(axis=0)
-    assert np.allclose(stds, 1.0, atol=1e-10)
+    from train import afe_por_bloques, aplicar_acm, construir_espacio_latente
+    scores, _ = afe_por_bloques(df_procesado)
+    coords, _, _ = aplicar_acm(df_procesado)
+    X_scaled, _, _ = construir_espacio_latente(scores, coords)
+    assert np.allclose(X_scaled.std(axis=0), 1.0, atol=1e-10)
 
 
-# ---------------------------------------------------------------------------
-# Tests de ACM
-# ---------------------------------------------------------------------------
+# ─── Tests ACM ─────────────────────────────────────────────────────
 
-def test_preparar_acm_retorna_dataframe(df_procesado):
-    """preparar_datos_acm retorna un DataFrame."""
-    from train import preparar_datos_acm
-    result = preparar_datos_acm(df_procesado)
-    assert isinstance(result, pd.DataFrame)
+def test_acm_retorna_dataframe(df_procesado):
+    """aplicar_acm retorna un DataFrame."""
+    from train import aplicar_acm
+    coords, mca, inercia = aplicar_acm(df_procesado)
+    assert isinstance(coords, pd.DataFrame)
 
 
-def test_preparar_acm_sin_nulos(df_procesado):
-    """preparar_datos_acm no tiene nulos (imputa por moda)."""
-    from train import preparar_datos_acm
-    result = preparar_datos_acm(df_procesado)
-    assert result.isnull().sum().sum() == 0
+def test_acm_sin_nulos(df_procesado):
+    """aplicar_acm no tiene nulos."""
+    from train import aplicar_acm
+    coords, _, _ = aplicar_acm(df_procesado)
+    assert coords.isnull().sum().sum() == 0
 
 
-# ---------------------------------------------------------------------------
-# Tests de clustering
-# ---------------------------------------------------------------------------
-
-def test_clustering_genera_etiquetas_validas(df_procesado):
-    """El clustering genera etiquetas para todos los registros."""
-    from sklearn.cluster import AgglomerativeClustering
-    from train import preparar_matriz_afe
-    X = preparar_matriz_afe(df_procesado)
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    hc = AgglomerativeClustering(n_clusters=3, linkage="ward")
-    labels = hc.fit_predict(X_scaled)
-    assert len(labels) == len(df_procesado)
-    assert set(labels).issubset({0, 1, 2})
+def test_acm_tres_dimensiones(df_procesado):
+    """aplicar_acm retorna 3 dimensiones."""
+    from train import aplicar_acm
+    coords, _, _ = aplicar_acm(df_procesado)
+    assert coords.shape[1] == 3
 
 
-def test_clustering_jerarquico_genera_etiquetas(df_procesado):
-    """El clustering jerárquico Ward funciona correctamente."""
-    from sklearn.cluster import AgglomerativeClustering
-    from train import preparar_matriz_afe
-    X = preparar_matriz_afe(df_procesado)
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    hc = AgglomerativeClustering(n_clusters=3, linkage="ward")
-    labels = hc.fit_predict(X_scaled)
-    assert len(np.unique(labels)) == 3
+# ─── Tests clustering ──────────────────────────────────────────────
+
+def test_clustering_ward_genera_etiquetas(df_procesado):
+    """evaluar_ward genera etiquetas para todos los registros."""
+    from train import afe_por_bloques, aplicar_acm, construir_espacio_latente, evaluar_ward
+    scores, _ = afe_por_bloques(df_procesado)
+    coords, _, _ = aplicar_acm(df_procesado)
+    X_scaled, _, _ = construir_espacio_latente(scores, coords)
+    resultados = evaluar_ward(X_scaled, k_range=range(2, 4))
+    assert 2 in resultados
+    assert len(resultados[2]["labels"]) == len(df_procesado)
 
 
-def test_evaluacion_clustering_retorna_metricas(df_procesado):
-    """evaluar_clustering retorna métricas para cada k."""
-    from train import preparar_matriz_afe, evaluar_clustering
-    X = preparar_matriz_afe(df_procesado)
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    resultados = evaluar_clustering(X_scaled, k_range=range(2, 5))
-    assert isinstance(resultados, dict)
-    assert 2 in resultados and 3 in resultados
-    for k, m in resultados.items():
-        assert "silueta" in m
-        assert "labels" in m
+def test_clustering_ward_k_validos(df_procesado):
+    """evaluar_ward genera k clusters correctos."""
+    from train import afe_por_bloques, aplicar_acm, construir_espacio_latente, evaluar_ward
+    scores, _ = afe_por_bloques(df_procesado)
+    coords, _, _ = aplicar_acm(df_procesado)
+    X_scaled, _, _ = construir_espacio_latente(scores, coords)
+    resultados = evaluar_ward(X_scaled, k_range=range(2, 5))
+    for k, v in resultados.items():
+        assert len(np.unique(v["labels"])) == k
 
 
-def test_silueta_entre_menos1_y_1(df_procesado):
-    """El coeficiente de silueta está en rango válido [-1, 1]."""
-    from train import preparar_matriz_afe, evaluar_clustering
-    X = preparar_matriz_afe(df_procesado)
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    resultados = evaluar_clustering(X_scaled, k_range=range(2, 4))
-    for k, m in resultados.items():
-        assert -1 <= m["silueta"] <= 1
+def test_metricas_contienen_campos(df_procesado):
+    """evaluar_ward retorna campos sil, db, dunn, bal, score."""
+    from train import afe_por_bloques, aplicar_acm, construir_espacio_latente, evaluar_ward
+    scores, _ = afe_por_bloques(df_procesado)
+    coords, _, _ = aplicar_acm(df_procesado)
+    X_scaled, _, _ = construir_espacio_latente(scores, coords)
+    resultados = evaluar_ward(X_scaled, k_range=range(2, 4))
+    for k, v in resultados.items():
+        assert "sil" in v
+        assert "dunn" in v
+        assert "db" in v
+        assert "bal" in v
+        assert "score" in v
 
 
-def test_k_optimo_cumple_minimo_grupo(df_procesado):
-    """El k óptimo garantiza que todos los grupos tienen al menos 5% del total."""
-    from train import preparar_matriz_afe, evaluar_clustering, seleccionar_k_optimo
-    X = preparar_matriz_afe(df_procesado)
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    resultados = evaluar_clustering(X_scaled, k_range=range(2, 5))
-    k = seleccionar_k_optimo(resultados)
-    labels = resultados[k]["labels"]
-    counts = pd.Series(labels).value_counts()
-    min_pct = counts.min() / len(labels)
-    assert min_pct >= 0.05 or k == 3  # k=3 es forzado por parsimonia
+def test_silueta_en_rango(df_procesado):
+    """El coeficiente de silueta está en [-1, 1]."""
+    from train import afe_por_bloques, aplicar_acm, construir_espacio_latente, evaluar_ward
+    scores, _ = afe_por_bloques(df_procesado)
+    coords, _, _ = aplicar_acm(df_procesado)
+    X_scaled, _, _ = construir_espacio_latente(scores, coords)
+    resultados = evaluar_ward(X_scaled, k_range=range(2, 4))
+    for k, v in resultados.items():
+        assert -1 <= v["sil"] <= 1
+
+
+def test_dunn_no_negativo(df_procesado):
+    """El índice de Dunn es >= 0."""
+    from train import afe_por_bloques, aplicar_acm, construir_espacio_latente, evaluar_ward
+    scores, _ = afe_por_bloques(df_procesado)
+    coords, _, _ = aplicar_acm(df_procesado)
+    X_scaled, _, _ = construir_espacio_latente(scores, coords)
+    resultados = evaluar_ward(X_scaled, k_range=range(2, 4))
+    for k, v in resultados.items():
+        assert v["dunn"] >= 0
+
+
+def test_seleccionar_k_retorna_dos_valores(df_procesado):
+    """seleccionar_mejor_k retorna k_optimo y k_segundo distintos."""
+    from train import afe_por_bloques, aplicar_acm, construir_espacio_latente, evaluar_ward, seleccionar_mejor_k
+    scores, _ = afe_por_bloques(df_procesado)
+    coords, _, _ = aplicar_acm(df_procesado)
+    X_scaled, _, _ = construir_espacio_latente(scores, coords)
+    resultados = evaluar_ward(X_scaled, k_range=range(2, 6))
+    k_opt, k_sec = seleccionar_mejor_k(resultados, "Ward", k_min=2)
+    assert k_opt != k_sec
+    assert k_opt in resultados
+    assert k_sec in resultados

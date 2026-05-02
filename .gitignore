@@ -12,3 +12,4 @@ __pycache__/
 *.pyc
 *.pyo
 .ipynb_checkpoints/
+data/raw/DATA_DEPURADA_PENSER_2025.xlsx
